@@ -1,4 +1,4 @@
-#import torchRolling_Unet_M
+# AD-GBC + Rolling-UNet
 import torch
 import torch.nn.functional as F
 from utils import *
