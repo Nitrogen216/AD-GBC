@@ -20,7 +20,7 @@ from albumentations import RandomRotate90, Resize
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', default='isic_Rolling_Unet_S_woDS', help='model name')
+    parser.add_argument('--name', default='busi_RU_GBC_L_div0.01_sca0.1', help='model name')
     args = parser.parse_args()
     return args
 
