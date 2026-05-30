@@ -78,7 +78,7 @@ python train_GBC.py \
 python val_GBC.py --name busi_RU_GBC_L_div0.01_sca0.1
 ```
 ## Acknowledgements
-This code repository is implemented based on [Rolling-Unet] [Link]([https://github.com/Jiaoyang45/Rolling-Unet]). 
+This code repository is implemented based on Rolling-Unet - [Link](https://github.com/Jiaoyang45/Rolling-Unet). 
 
 ## Citations
 If this code is helpful for your study, please cite:
