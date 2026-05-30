@@ -39,6 +39,25 @@ python train_GBC.py \
   --div_weight 0.01 \
   --scale_weight 0.1
 ```
+```
+python train_GBC.py \
+  --dataset glas \
+  --name glas_RU_GBC_L_div0.1_sca0.1 \
+  --arch GBC_Rolling_Unet_L \
+  --loss 'BCEDiceWithGeometryLoss' \
+  --div_weight 0.1 \
+  --scale_weight 0.1
+```
+```
+python train_GBC.py \
+  --dataset cvc \
+  --name cvc_RU_GBC_L_div0.1_sca0.1 \
+  --arch GBC_Rolling_Unet_L \
+  --loss 'BCEDiceWithGeometryLoss' \
+  --div_weight 0.1 \
+  --scale_weight 0.1 \
+  --dataseed 6142
+```
 
 - Evaluate.
 ```
@@ -47,3 +66,6 @@ python val_GBC.py --name busi_RU_GBC_L_div0.01_sca0.1
 
 ## Citations
 If this code is helpful for your study, please cite:
+```
+X. Shen, Q. Zhao, and L. Feng, “AD-GBC: Anisotropic granular-ball skip-connection refiner for UNet-based medical image segmentation,” Accepted to IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2026.
+```
