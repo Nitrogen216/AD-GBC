@@ -26,19 +26,30 @@ Prototype or region-attention modules have recently improved medical image segme
 - Make sure to put the files as the following structure. For binary segmentation, just use folder 0.
 ```
 inputs
-└── <dataset name>
-    ├── images
-    |   ├── 001.png
-    │   ├── 002.png
-    │   ├── 003.png
-    │   ├── ...
-    |
-    └── masks
-        └── 0
-            ├── 001.png
-            ├── 002.png
-            ├── 003.png
-            ├── ...
+│   ├── busi
+│     ├── images
+│           ├── malignant (1).png
+|           ├── ...
+|     ├── masks
+│        ├── 0
+│           ├── malignant (1)_mask.png
+|           ├── ...
+│   ├── GLAS
+│     ├── images
+│           ├── 0.png
+|           ├── ...
+|     ├── masks
+│        ├── 0
+│           ├── 0.png
+|           ├── ...
+│   ├── CVC-ClinicDB
+│     ├── images
+│           ├── 0.png
+|           ├── ...
+|     ├── masks
+│        ├── 0
+│           ├── 0.png
+|           ├── ...
 ```
 
 
