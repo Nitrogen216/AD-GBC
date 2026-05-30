@@ -1,6 +1,18 @@
 # AD-GBC + Rolling-UNet
 The official implementation of the paper "AD-GBC: Anisotropic Granular-Ball Skip-Connection Refiner for UNet-Based Medical Image Segmentation" accepted in CVPR-2026.
 
+### Abstract
+Prototype or region-attention modules have recently improved medical image segmentation but still suffer from two fundamental limitations: 1) they represent each semantic concept as a point or isotropic region, failing to capture the inherently anisotropic geometry of real feature distributions; and 2) many rely on non-differentiable clustering or one-way kernel weighting, which restricts their ability to form coherent region-level representations. We address these issues with the Anisotropic Differentiable Granular-Ball (AD-GBC) module, which generalizes prototypes into learnable geometric regions parameterized by a center and an anisotropic vector scale. AD-GBC aggregates local features into region-level semantics and redistributes the refined representation back to pixels in a fully differentiable manner, enabling geometry-aware refinement within modern UNet-style architectures. Two geometric regularizers, a Wasserstein-based diversity loss and a scale consistency loss, mitigate center collapse and encourage stable, well-formed region geometry.AD-GBC yields consistent improvements across four widely used medical segmentation benchmarks (BUSI, GlaS, CVC-ClinicDB, ISIC17) when integrated into two strong backbones (Rolling-UNet and U-KAN), demonstrating that the proposed geometric region formulation generalizes well across different imaging conditions.
+
+<p align="center">
+  <img src="imgs/motivation.png" width="400"/>
+</p>
+
+<p align="center">
+  <img src="imgs/overview of AD-GBC integration.png" width="800"/>
+</p>
+
+
 ### Datasets
 1) BUSI - [Link](https://www.kaggle.com/aryashah2k/breast-ultrasound-images-dataset)
 2) GLAS - [Link](https://websignon.warwick.ac.uk/origin/slogin?shire=https%3A%2F%2Fwarwick.ac.uk%2Fsitebuilder2%2Fshire-read&providerId=urn%3Awarwick.ac.uk%3Asitebuilder2%3Aread%3Aservice&target=https%3A%2F%2Fwarwick.ac.uk%2Ffac%2Fcross_fac%2Ftia%2Fdata%2Fglascontest&status=notloggedin)
