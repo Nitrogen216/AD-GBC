@@ -23,9 +23,12 @@ Prototype or region-attention modules have recently improved medical image segme
 
 
 ### Data Format
-- Make sure to put the files as the following structure. For binary segmentation, just use folder 0.
+- In this workspace, datasets are stored outside this method repository so all
+  methods can evaluate on the same data and the same split files. Use
+  `../../Dataset/segmentation` as the shared data root. For binary
+  segmentation, just use folder 0.
 ```
-inputs
+../../Dataset/segmentation
 │   ├── busi
 │     ├── images
 │           ├── malignant (1).png
@@ -59,6 +62,8 @@ inputs
 python train_GBC.py \
   --dataset busi \
   --name busi_RU_GBC_L_div0.01_sca0.1 \
+  --data_root ../../Dataset/segmentation \
+  --artifact_root ../../Artifacts/AD-GBC \
   --arch GBC_Rolling_Unet_L \
   --loss 'BCEDiceWithGeometryLoss' \
   --div_weight 0.01 \
@@ -68,6 +73,8 @@ python train_GBC.py \
 python train_GBC.py \
   --dataset glas \
   --name glas_RU_GBC_L_div0.1_sca0.1 \
+  --data_root ../../Dataset/segmentation \
+  --artifact_root ../../Artifacts/AD-GBC \
   --arch GBC_Rolling_Unet_L \
   --loss 'BCEDiceWithGeometryLoss' \
   --div_weight 0.1 \
@@ -77,6 +84,8 @@ python train_GBC.py \
 python train_GBC.py \
   --dataset cvc \
   --name cvc_RU_GBC_L_div0.1_sca0.1 \
+  --data_root ../../Dataset/segmentation \
+  --artifact_root ../../Artifacts/AD-GBC \
   --arch GBC_Rolling_Unet_L \
   --loss 'BCEDiceWithGeometryLoss' \
   --div_weight 0.1 \
@@ -86,7 +95,10 @@ python train_GBC.py \
 
 - Evaluate.
 ```
-python val_GBC.py --name busi_RU_GBC_L_div0.01_sca0.1
+python val_GBC.py \
+  --name busi_RU_GBC_L_div0.01_sca0.1 \
+  --data_root ../../Dataset/segmentation \
+  --artifact_root ../../Artifacts/AD-GBC
 ```
 ## Acknowledgement
 This code repository is implemented based on Rolling-Unet - [Link](https://github.com/Jiaoyang45/Rolling-Unet). 

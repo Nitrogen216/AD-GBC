@@ -1,7 +1,7 @@
 import os
-import cv2
 import numpy as np
 import torch.utils.data
+from PIL import Image
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -53,11 +53,13 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_id = self.img_ids[idx]
         
-        img = cv2.imread(os.path.join(self.img_dir, img_id + self.img_ext))
+        img_path = os.path.join(self.img_dir, img_id + self.img_ext)
+        img = np.array(Image.open(img_path).convert('RGB'))
 
         mask = []
         for i in range(self.num_classes):
-            mask.append(cv2.imread(os.path.join(self.mask_dir, str(i), img_id + self.mask_ext), cv2.IMREAD_GRAYSCALE)[..., None])
+            mask_path = os.path.join(self.mask_dir, str(i), img_id + self.mask_ext)
+            mask.append(np.array(Image.open(mask_path).convert('L'))[..., None])
 
         mask = np.dstack(mask)
 

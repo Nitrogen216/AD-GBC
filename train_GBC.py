@@ -2,6 +2,7 @@ import argparse
 import os
 from collections import OrderedDict
 from glob import glob
+from pathlib import Path
 import random
 import numpy as np
 import pandas as pd
@@ -10,17 +11,14 @@ import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.optim as optim
 import yaml
-import albumentations as A
-from albumentations.augmentations import transforms
-from albumentations.core.composition import Compose
 from sklearn.model_selection import train_test_split
 from torch.optim import lr_scheduler
 from tqdm import tqdm
-from albumentations import RandomRotate90, Resize
 import archs_GBC
 import losses
 from dataset import Dataset
 from metrics import iou_score
+from simple_transforms import SimpleSegTransform
 from utils import AverageMeter, str2bool
 import time
 from tensorboardX import SummaryWriter
@@ -37,6 +35,8 @@ def parse_args():
     parser.add_argument('--epochs', default=400, type=int, metavar='N', help='number of total epochs to run')
     parser.add_argument('-b', '--batch_size', default=8, type=int, metavar='N', help='mini-batch size(default: 8)')
     parser.add_argument('--num_workers', default=4, type=int)
+    parser.add_argument('--device', default='auto',
+                        help='device to use: auto, cuda, mps, or cpu')
 
     parser.add_argument('--dataseed', default=41, type=int,
                         help='') # default 2981
@@ -58,6 +58,12 @@ def parse_args():
 
     # data
     parser.add_argument('--dataset', default='isic', help='dataset name')  ### isic, busi, chasedb1, glas
+    parser.add_argument('--data_root', default='auto',
+                        help='dataset root. auto resolves to ../../Dataset/segmentation when available')
+    parser.add_argument('--split_root', default='auto',
+                        help='split root. auto resolves to ../../Dataset/splits/segmentation when available')
+    parser.add_argument('--artifact_root', default='auto',
+                        help='artifact root. auto resolves to ../../Artifacts/AD-GBC when available')
     parser.add_argument('--img_ext', default='.png', help='image file extension')
     parser.add_argument('--mask_ext', default='.png', help='masks file extension')
 
@@ -97,7 +103,102 @@ def parse_args():
     return config
 
 
-def train(config, train_loader, model, criterion, optimizer):
+def select_device(name='auto'):
+    if name != 'auto':
+        return torch.device(name)
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+def empty_device_cache(device):
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    elif device.type == 'mps' and hasattr(torch.mps, 'empty_cache'):
+        torch.mps.empty_cache()
+
+
+def find_workspace_root():
+    code_root = Path(__file__).resolve().parent
+    for candidate in [Path.cwd().resolve(), code_root, *code_root.parents]:
+        if (candidate / 'Dataset' / 'segmentation').exists():
+            return candidate
+        if (candidate / '.aris').exists():
+            return candidate
+    return code_root.parent.parent
+
+
+def resolve_data_root(data_root='auto'):
+    if data_root and data_root != 'auto':
+        return Path(data_root).expanduser().resolve()
+
+    env_root = os.environ.get('AD_GBC_DATA_ROOT')
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    workspace_root = find_workspace_root()
+    code_root = Path(__file__).resolve().parent
+    candidates = [
+        workspace_root / 'Dataset' / 'segmentation',
+        code_root / 'inputs',
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+def resolve_split_root(split_root='auto'):
+    if split_root and split_root != 'auto':
+        return Path(split_root).expanduser().resolve()
+
+    env_root = os.environ.get('AD_GBC_SPLIT_ROOT')
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    return (find_workspace_root() / 'Dataset' / 'splits' / 'segmentation').resolve()
+
+
+def resolve_artifact_root(artifact_root='auto'):
+    if artifact_root and artifact_root != 'auto':
+        return Path(artifact_root).expanduser().resolve()
+
+    env_root = os.environ.get('AD_GBC_ARTIFACT_ROOT')
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    return (find_workspace_root() / 'Artifacts' / 'AD-GBC').resolve()
+
+
+def read_split_file(path):
+    return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def load_split_ids(split_root, dataset, seed, available_ids):
+    split_dir = Path(split_root) / dataset
+    train_path = split_dir / f'seed_{seed}_train.txt'
+    val_path = split_dir / f'seed_{seed}_val.txt'
+    if not train_path.exists() or not val_path.exists():
+        return None
+
+    train_ids = read_split_file(train_path)
+    val_ids = read_split_file(val_path)
+    available = set(available_ids)
+    missing = [img_id for img_id in train_ids + val_ids if img_id not in available]
+    if missing:
+        raise FileNotFoundError(
+            f'split files under {split_dir} reference missing image ids, e.g. {missing[:5]}'
+        )
+
+    print('Using fixed split files:')
+    print('  train: %s' % train_path)
+    print('  val: %s' % val_path)
+    return train_ids, val_ids
+
+
+def train(config, train_loader, model, criterion, optimizer, device):
     avg_meters = {'loss': AverageMeter(),
                   'iou': AverageMeter()}
 
@@ -105,8 +206,8 @@ def train(config, train_loader, model, criterion, optimizer):
 
     pbar = tqdm(total=len(train_loader))
     for input, target, _ in train_loader:
-        input = input.cuda()
-        target = target.cuda()
+        input = input.to(device)
+        target = target.to(device)
 
         # compute output
         if config['deep_supervision']:
@@ -151,7 +252,7 @@ def train(config, train_loader, model, criterion, optimizer):
                         ('iou', avg_meters['iou'].avg)])
 
 
-def validate(config, val_loader, model, criterion):
+def validate(config, val_loader, model, criterion, device):
     avg_meters = {'loss': AverageMeter(),
                   'iou': AverageMeter(),
                   'dice': AverageMeter()}
@@ -162,8 +263,8 @@ def validate(config, val_loader, model, criterion):
     with torch.no_grad():
         pbar = tqdm(total=len(val_loader))
         for input, target, _ in val_loader:
-            input = input.cuda()
-            target = target.cuda()
+            input = input.to(device)
+            target = target.to(device)
 
             # compute output
             if config['deep_supervision']:
@@ -217,9 +318,21 @@ def seed_torch(seed=1029):
 def main():
     seed_torch()
     config = vars(parse_args())
+    device = select_device(config['device'])
+    data_root = resolve_data_root(config['data_root'])
+    split_root = resolve_split_root(config['split_root'])
+    artifact_root = resolve_artifact_root(config['artifact_root'])
+    models_root = artifact_root / 'models'
+    runs_root = artifact_root / 'runs'
+    config['data_root'] = str(data_root)
+    config['split_root'] = str(split_root)
+    config['artifact_root'] = str(artifact_root)
+    print('Using device: %s' % device)
+    print('Using data root: %s' % data_root)
+    print('Using split root: %s' % split_root)
+    print('Using artifact root: %s' % artifact_root)
 
     current_time = time.strftime("%Y-%m-%dT%H:%M", time.localtime())
-    my_writer = SummaryWriter()
 
     if config['name'] is None:
         if config['deep_supervision']:
@@ -227,23 +340,25 @@ def main():
         else:
             config['name'] = '%s_%s_woDS' % (config['dataset'], config['arch'])
 
-    os.makedirs('models/%s' % config['name'], exist_ok=True)
+    model_dir = models_root / config['name']
+    model_dir.mkdir(parents=True, exist_ok=True)
+    my_writer = SummaryWriter(log_dir=str(runs_root / config['name']))
 
     print('-' * 20)
     for key in config:
         print('%s: %s' % (key, config[key]))
     print('-' * 20)
 
-    with open('models/%s/config.yml' % config['name'], 'w') as f:
+    with open(model_dir / 'config.yml', 'w') as f:
         yaml.dump(config, f)
 
     # define loss function (criterion)
     if config['loss'] == 'BCEWithLogitsLoss':
-        criterion = nn.BCEWithLogitsLoss().cuda()
+        criterion = nn.BCEWithLogitsLoss().to(device)
     elif config['loss'] == 'BCEDiceWithGeometryLoss':
-        criterion = losses.__dict__[config['loss']](div_weight=config.get('div_weight'),scale_weight=config.get('scale_weight')).cuda()
+        criterion = losses.__dict__[config['loss']](div_weight=config.get('div_weight'),scale_weight=config.get('scale_weight')).to(device)
     else:
-        criterion = losses.__dict__[config['loss']]().cuda()
+        criterion = losses.__dict__[config['loss']]().to(device)
 
     cudnn.benchmark = True
 
@@ -260,7 +375,7 @@ def main():
                                            deep_supervision=config['deep_supervision'],
                                            **gbc_kwargs)
 
-    model = model.cuda()
+    model = model.to(device)
 
     #params = filter(lambda p: p.requires_grad, model.parameters())
     # === parameter groups: separate kan params and gbc centers if desired ===
@@ -318,36 +433,35 @@ def main():
         config['img_ext'] = '.jpg'
         config['mask_ext'] = '_segmentation.png'
         
-    img_ids = glob(os.path.join('inputs', config['dataset'], 'images', '*' + config['img_ext']))
+    dataset_root = data_root / config['dataset']
+    img_ids = glob(str(dataset_root / 'images' / ('*' + config['img_ext'])))
     img_ids = [os.path.splitext(os.path.basename(p))[0] for p in img_ids]
 
-    train_img_ids, val_img_ids = train_test_split(img_ids, test_size=0.2, random_state=config['dataseed'])
+    split_ids = load_split_ids(split_root, config['dataset'], config['dataseed'], img_ids)
+    if split_ids is not None:
+        train_img_ids, val_img_ids = split_ids
+    else:
+        print('No fixed split found; falling back to train_test_split with dataseed=%s' % config['dataseed'])
+        train_img_ids, val_img_ids = train_test_split(
+            img_ids, test_size=0.2, random_state=config['dataseed']
+        )
 
-    train_transform = Compose([
-        RandomRotate90(),
-        A.HorizontalFlip(), #transforms.Flip()
-        Resize(config['input_h'], config['input_w']),
-        transforms.Normalize(),
-    ])
-
-    val_transform = Compose([
-        Resize(config['input_h'], config['input_w']),
-        transforms.Normalize(),
-    ])
+    train_transform = SimpleSegTransform(config['input_h'], config['input_w'], training=True)
+    val_transform = SimpleSegTransform(config['input_h'], config['input_w'], training=False)
 
     
     train_dataset = Dataset(
         img_ids=train_img_ids,
-        img_dir=os.path.join('inputs', config['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', config['dataset'], 'masks'),
+        img_dir=str(dataset_root / 'images'),
+        mask_dir=str(dataset_root / 'masks'),
         img_ext=config['img_ext'],
         mask_ext=config['mask_ext'],
         num_classes=config['num_classes'],
         transform=train_transform)
     val_dataset = Dataset(
         img_ids=val_img_ids,
-        img_dir=os.path.join('inputs', config['dataset'], 'images'),
-        mask_dir=os.path.join('inputs', config['dataset'], 'masks'),
+        img_dir=str(dataset_root / 'images'),
+        mask_dir=str(dataset_root / 'masks'),
         img_ext=config['img_ext'],
         mask_ext=config['mask_ext'],
         num_classes=config['num_classes'],
@@ -384,9 +498,9 @@ def main():
         print('Epoch [%d/%d]' % (epoch, config['epochs']))
 
         # train for one epoch
-        train_log = train(config, train_loader, model, criterion, optimizer)
+        train_log = train(config, train_loader, model, criterion, optimizer, device)
         # evaluate on validation set
-        val_log = validate(config, val_loader, model, criterion)
+        val_log = validate(config, val_loader, model, criterion, device)
 
         if config['scheduler'] == 'CosineAnnealingLR':
             scheduler.step()
@@ -404,8 +518,7 @@ def main():
         log['val_iou'].append(val_log['iou'])
         log['val_dice'].append(val_log['dice'])
 
-        pd.DataFrame(log).to_csv('models/%s/log.csv' %
-                                 config['name'], index=False)
+        pd.DataFrame(log).to_csv(model_dir / 'log.csv', index=False)
 
         my_writer.add_scalar('loss', train_log['loss'], global_step=epoch)
         my_writer.add_scalar('iou', train_log['iou'], global_step=epoch)
@@ -416,8 +529,7 @@ def main():
         trigger += 1
 
         if val_log['iou'] > best_iou:
-            torch.save(model.state_dict(), 'models/%s/model.pth' %
-                       config['name'])
+            torch.save(model.state_dict(), model_dir / 'model.pth')
             best_iou = val_log['iou']
             best_dice = val_log['dice']
             print("=> saved best model")
@@ -430,7 +542,7 @@ def main():
             print("=> early stopping")
             break
 
-        torch.cuda.empty_cache()
+        empty_device_cache(device)
 
 
 if __name__ == '__main__':
