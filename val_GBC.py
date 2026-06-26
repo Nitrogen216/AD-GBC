@@ -172,6 +172,7 @@ def main():
         'gbc_proj_dim': None if config.get('gbc_proj_dim', 0) == 0 else config.get('gbc_proj_dim'),
         'use_diag_cov': config.get('use_diag_cov', True),
         'tau': config.get('tau', 1.0),
+        'gbc_mode': config.get('gbc_mode', 'static'),
     }
     model = archs_GBC.__dict__[config['arch']](num_classes=config['num_classes'],
                                            input_channels=config['input_channels'],

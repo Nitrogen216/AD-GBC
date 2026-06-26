@@ -8,7 +8,8 @@ import math
 __all__ = ['GBC_Rolling_Unet_S', 'GBC_Rolling_Unet_M', 'GBC_Rolling_Unet_L']
 
 class GranularBall(nn.Module):
-    def __init__(self, in_ch, num_balls=32, proj_dim=None, use_residual=True, use_diag_cov=True, tau=1.0):
+    def __init__(self, in_ch, num_balls=32, proj_dim=None, use_residual=True, use_diag_cov=True,
+                 tau=1.0, gbc_mode='static', consensus_eps=1e-6):
         super().__init__()
         self.in_ch = in_ch
         self.proj_dim = proj_dim or in_ch
@@ -16,6 +17,13 @@ class GranularBall(nn.Module):
         self.use_residual = use_residual
         self.use_diag_cov = use_diag_cov
         self.tau = tau
+        # consensus_mode: region descriptor used for reconstruction (A000 spec / Prompt 1).
+        #   static     = att @ centers            (legacy released behaviour)
+        #   paper_sum  = broadcast(Σ_i α z_i)      (paper Eq.4 literal, un-normalized; diagnostic)
+        #   mean       = broadcast(Σ_i α z_i / Σ_i α)   (normalized Set->Ball->Set)
+        assert gbc_mode in ('static', 'paper_sum', 'mean'), gbc_mode
+        self.gbc_mode = gbc_mode
+        self.consensus_eps = consensus_eps
 
         self.centers = nn.Parameter(torch.randn(num_balls, self.proj_dim) * 0.01)
         # ★ 新增：半径/对角协方差（softplus 保正）
@@ -38,7 +46,11 @@ class GranularBall(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x, tau=1.0):
+    def forward(self, x, tau=None):
+        # Prompt 1 fix: honour self.tau when the caller passes no tau (the model
+        # call sites use self.gbc(t3) / self.gbc(out)). Previously --tau never
+        # took effect because forward defaulted to tau=1.0.
+        tau_eff = self.tau if tau is None else tau
         B, C, H, W = x.shape
         z = self.bn_in(self.proj_in(x)) if self.proj_in is not None else x
         d = z.shape[1]
@@ -53,10 +65,21 @@ class GranularBall(nn.Module):
         dif_scaled = dif / sigma                                           # 广播
         dist2 = (dif_scaled ** 2).sum(-1)                                  # (B,N,K)
 
-        att = F.softmax(-dist2 / max(1e-6, tau), dim=-1)                   # 软集合归属
+        att = F.softmax(-dist2 / max(1e-6, tau_eff), dim=-1)              # 软集合归属
 
-        recon_flat = torch.matmul(att, self.centers)                        # (B,N,d)
-        recon = recon_flat.permute(0,2,1).view(B, d, H, W)
+        # region update (consensus_mode). static reproduces legacy att @ centers.
+        if self.gbc_mode == 'static':
+            recon_flat = torch.matmul(att, self.centers)                   # (B,N,d)
+        else:
+            region = torch.einsum('bnk,bnd->bkd', att, z_flat)             # Σ_i α z_i  (B,K,d)
+            if self.gbc_mode == 'mean':
+                mass = att.sum(dim=1).clamp_min(self.consensus_eps)        # (B,K)
+                region = region / mass.unsqueeze(-1)
+            # paper_sum: no normalization (diagnostic; magnitude scales with N/mass)
+            recon_flat = torch.einsum('bnk,bkd->bnd', att, region)         # (B,N,d)
+        # reshape (not view): recon_flat is non-contiguous after permute, which
+        # breaks .view() on the mps backward pass.
+        recon = recon_flat.permute(0,2,1).reshape(B, d, H, W)
 
         if self.proj_out is not None:
             recon = self.bn_out(self.proj_out(recon))
@@ -110,7 +133,7 @@ class Lo2(nn.Module):
 
         ### DOR-MLP
         ### OR-MLP
-        xn = x.transpose(1, 2).view(B, C, H, W).contiguous()
+        xn = x.transpose(1, 2).reshape(B, C, H, W).contiguous()
         xs = torch.chunk(xn, C, 1)
         x_shift = [torch.roll(x_c, shift, 2) for x_c, shift in zip(xs, range(0, C))]
         x_cat = torch.cat(x_shift, 1)
@@ -119,7 +142,7 @@ class Lo2(nn.Module):
         x_shift_r = self.fc1(x_shift_r)
         x_shift_r = self.act1(x_shift_r)
         x_shift_r = self.drop(x_shift_r)
-        xn = x_shift_r.transpose(1, 2).view(B, C, H, W).contiguous()
+        xn = x_shift_r.transpose(1, 2).reshape(B, C, H, W).contiguous()
         xs = torch.chunk(xn, C, 1)
         x_shift = [torch.roll(x_c, shift, 3) for x_c, shift in zip(xs, range(0, C))]
         x_cat = torch.cat(x_shift, 1)
@@ -129,7 +152,7 @@ class Lo2(nn.Module):
         x_1 = self.drop(x_shift_c)
 
            ### OR-MLP
-        xn = x.transpose(1, 2).view(B, C, H, W).contiguous()
+        xn = x.transpose(1, 2).reshape(B, C, H, W).contiguous()
         xs = torch.chunk(xn, C, 1)
         x_shift = [torch.roll(x_c, -shift, 3) for x_c, shift in zip(xs, range(0, C))]
         x_cat = torch.cat(x_shift, 1)
@@ -138,7 +161,7 @@ class Lo2(nn.Module):
         x_shift_c = self.fc3(x_shift_c)
         x_shift_c = self.act1(x_shift_c)
         x_shift_c = self.drop(x_shift_c)
-        xn = x_shift_c.transpose(1, 2).view(B, C, H, W).contiguous()
+        xn = x_shift_c.transpose(1, 2).reshape(B, C, H, W).contiguous()
         xs = torch.chunk(xn, C, 1)
         x_shift = [torch.roll(x_c, shift, 2) for x_c, shift in zip(xs, range(0, C))]
         x_cat = torch.cat(x_shift, 1)
@@ -154,7 +177,7 @@ class Lo2(nn.Module):
         x1 = self.fc5(x1)
         x1 = self.drop(x1)
         x1 = torch.add(x1, x)
-        x2 = x.transpose(1, 2).view(B, C, H, W)
+        x2 = x.transpose(1, 2).reshape(B, C, H, W)
 
         ### DSC
         x2 = self.dwconv(x2, H, W)
@@ -288,7 +311,7 @@ class GBC_Rolling_Unet_S(nn.Module):
                  embed_dims=[16, 32, 64, 128, 256],
                  num_heads=[1, 2, 4, 8], qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, depths=[1, 1, 1], sr_ratios=[8, 4, 2, 1],
-                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, **kwargs):
+                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, gbc_mode='static', **kwargs):
         super().__init__()
 
         self.embed_dims = embed_dims
@@ -339,7 +362,7 @@ class GBC_Rolling_Unet_S(nn.Module):
         self.final = nn.Conv2d(8, num_classes, kernel_size=1)
 
         proj_dim_actual = gbc_proj_dim if gbc_proj_dim and gbc_proj_dim > 0 else embed_dims[2]
-        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau)
+        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau, gbc_mode=gbc_mode)
 
     def forward(self, x):
         B = x.shape[0]
@@ -419,7 +442,7 @@ class GBC_Rolling_Unet_M(nn.Module):
                  embed_dims=[32, 64, 128, 256, 512],
                  num_heads=[1, 2, 4, 8], qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, depths=[1, 1, 1], sr_ratios=[8, 4, 2, 1],
-                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, **kwargs):
+                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, gbc_mode='static', **kwargs):
         super().__init__()
 
         self.embed_dims = embed_dims
@@ -470,7 +493,7 @@ class GBC_Rolling_Unet_M(nn.Module):
         self.final = nn.Conv2d(16, num_classes, kernel_size=1)
 
         proj_dim_actual = gbc_proj_dim if gbc_proj_dim and gbc_proj_dim > 0 else embed_dims[2]
-        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau)
+        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau, gbc_mode=gbc_mode)
 
     def forward(self, x):
         B = x.shape[0]
@@ -549,7 +572,7 @@ class GBC_Rolling_Unet_L(nn.Module):
                  embed_dims=[64, 128, 256, 512, 1024],
                  num_heads=[1, 2, 4, 8], qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, depths=[1, 1, 1], sr_ratios=[8, 4, 2, 1],
-                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, **kwargs):
+                 gbc_num_balls=32, gbc_proj_dim=None, use_diag_cov=True, tau=1.0, gbc_mode='static', **kwargs):
         super().__init__()
 
         self.embed_dims = embed_dims
@@ -600,7 +623,7 @@ class GBC_Rolling_Unet_L(nn.Module):
         self.final = nn.Conv2d(32, num_classes, kernel_size=1)
 
         proj_dim_actual = gbc_proj_dim if gbc_proj_dim and gbc_proj_dim > 0 else embed_dims[2]
-        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau)
+        self.gbc = GranularBall(in_ch=embed_dims[2], num_balls=gbc_num_balls, proj_dim=proj_dim_actual, use_diag_cov=use_diag_cov, use_residual=True, tau=tau, gbc_mode=gbc_mode)
 
     def forward(self, x):
         B = x.shape[0]

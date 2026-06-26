@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,65 +41,67 @@ class LovaszHingeLoss(nn.Module):
         return loss
 
 
-def wasserstein_diversity_loss(centers):
-    """
-    基于ICLR 2024论文思想，使用瓦瑟斯坦距离计算多样性损失。
-    
-    Args:
-        centers (torch.Tensor): GBC的中心点张量, 形状为 (K, D)。
+def wasserstein_diversity_loss(centers, mode='legacy'):
+    """Wasserstein spectral diversity loss on the ball centers (K, D).
+
+    mode (A000 spec / Prompt 1 Part D):
+      legacy     : released repo loss, clamp(||mu||^2 + tr(Σ) - 2 tr(√Σ), min=0).
+                   (coefficient differs from the paper and the outer clamp can
+                   zero the gradient at small-center init — kept only as a
+                   reproduction baseline.)
+      paper      : ||mu||^2 + tr(Σ) - (2/√D) tr(√Σ), NO clamp (paper Eq.8).
+      rank_aware : ||mu||^2 + Σ_j (s_j - 1/√D)^2 over r=min(D,K-1) singular
+                   values of X=(C-mean)/√K. Equals `paper` + r/D (gradient-
+                   identical), is non-negative and stable. RECOMMENDED.
     """
     K, D = centers.shape
     if K <= 1:
         return torch.tensor(0.0, device=centers.device)
 
-    # --- 1. 计算样本均值和协方差矩阵  ---
     mu_hat = torch.mean(centers, dim=0)
-    centers_centered = centers - mu_hat
-    # Sigma_hat 形状: (D, D)
-    Sigma_hat = (centers_centered.t() @ centers_centered) / K
-
-    # --- 2. 计算瓦瑟斯坦距离的各个组成部分 ---
-    # a) 均值部分的损失: ||mu_hat||^2
     term_mean = torch.sum(mu_hat ** 2)
 
-    # b) 协方差矩阵的迹: Tr(Sigma_hat)
-    term_trace_Sigma = torch.trace(Sigma_hat)
-    
-    # c) 协方差矩阵平方根的迹: Tr(sqrt(Sigma_hat))
-    #    最高效、最稳定的方法是通过特征值分解来计算
-    try:
-        # eigh 专门用于对称/厄米矩阵，返回特征值和特征向量
-        eigenvalues = torch.linalg.eigvalsh(Sigma_hat)
-        # 为防止数值不稳定导致极小的负特征值，用clamp截断
-        term_trace_sqrt_Sigma = torch.sum(torch.sqrt(torch.clamp(eigenvalues, min=0)))
-    except torch.linalg.LinAlgError:
-        # 如果矩阵奇异或在训练中出现问题，返回0损失，避免训练崩溃
-        return torch.tensor(0.0, device=centers.device)
+    if mode == 'legacy':
+        centers_centered = centers - mu_hat
+        Sigma_hat = (centers_centered.t() @ centers_centered) / K
+        term_trace_Sigma = torch.trace(Sigma_hat)
+        try:
+            eigenvalues = torch.linalg.eigvalsh(Sigma_hat)
+            term_trace_sqrt_Sigma = torch.sum(torch.sqrt(torch.clamp(eigenvalues, min=0)))
+        except torch.linalg.LinAlgError:
+            return torch.tensor(0.0, device=centers.device)
+        w2_squared = term_mean + term_trace_Sigma - 2 * term_trace_sqrt_Sigma
+        return torch.clamp(w2_squared, min=0)
 
-    # d) 根据论文公式(7)的变体 (目标分布为N(0,I))，计算距离的平方
-    # W^2 = ||mu||^2 + Tr(Sigma) + Tr(I) - 2*Tr(sqrt(Sigma))
-    # Tr(I) = D (特征维度)
-    # 论文中目标是N(0, I/m)，所以有1/m项。我们简化目标为N(0,I)，更关注各向同性
-    w2_squared = term_mean + term_trace_Sigma - 2 * term_trace_sqrt_Sigma
-    
-    # 返回一个非负的损失值
-    return torch.clamp(w2_squared, min=0)
+    # paper / rank_aware: singular values of X = (C - mean)/sqrt(K) in float32.
+    X = (centers - mu_hat) / math.sqrt(K)
+    s = torch.linalg.svdvals(X.float()).to(centers.dtype)        # length min(K,D)
+    r = min(D, K - 1)
+    s = s[:r]
+    inv_sqrt_D = 1.0 / math.sqrt(D)
+    if mode == 'paper':
+        return term_mean + (s ** 2).sum() - 2 * inv_sqrt_D * s.sum()
+    if mode == 'rank_aware':
+        return term_mean + ((s - inv_sqrt_D) ** 2).sum()
+    raise ValueError(f'unknown wdiv mode: {mode}')
 
 class BCEDiceWithGeometryLoss(nn.Module):
-    def __init__(self, div_weight=0.1, scale_weight=0.1):
+    def __init__(self, div_weight=0.1, scale_weight=0.1, wdiv_mode='legacy'):
         """
         复合损失函数.
-        param div_weight: 多样性损失的权重
-        param scale_weight: 尺度一致性损失的权重
+        param div_weight: 多样性损失的权重 (λ_W)
+        param scale_weight: 尺度一致性损失的权重 (λ_S)
+        param wdiv_mode: 'legacy' | 'paper' | 'rank_aware' (see wasserstein_diversity_loss)
         """
         super().__init__()
         # 1. 在 __init__ 中实例化基础损失，并传入其超参数
         self.bce_dice = BCEDiceLoss()
-        
+
         # 2. 将多样性损失的权重也作为超参数存储起来
         self.div_weight = div_weight
         # 3. 将尺度一致性损失的权重存储起来
         self.scale_weight = scale_weight # <--- 新增
+        self.wdiv_mode = wdiv_mode
 
     def calculate_scale_loss(self, att, dif, log_sigma):
         """
@@ -163,7 +167,7 @@ class BCEDiceWithGeometryLoss(nn.Module):
             gbc_module = model.gbc
 
         centers = gbc_module.centers
-        div_loss = wasserstein_diversity_loss(centers)
+        div_loss = wasserstein_diversity_loss(centers, mode=self.wdiv_mode)
 
         # --- 3. 计算尺度一致性损失 (L_scale_con) ---
         scale_loss = torch.tensor(0.0, device=main_loss.device)

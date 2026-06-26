@@ -84,9 +84,21 @@ def parse_args():
     parser.add_argument('--gbc_num_balls', default=32, type=int, help='number of granular balls (shared)')
     parser.add_argument('--gbc_proj_dim', default=0, type=int,
                         help='projection dim for GBC; 0 means use kan_input_dim (auto)')
-    parser.add_argument('--use_diag_cov', default=True, help='Use diagonal covariance (K×D scales)') 
+    parser.add_argument('--use_diag_cov', default=True, type=str2bool,
+                        help='Use diagonal covariance (K×D scales). Fixed Prompt 1: needs str2bool '
+                             'so --use_diag_cov False actually selects isotropic.')
     parser.add_argument('--tau', default=1.0, type=float,
-                        help='softmax temperature')                 
+                        help='softmax temperature')
+    parser.add_argument('--gbc_mode', default='static',
+                        choices=['static', 'paper_sum', 'mean'],
+                        help='GBC region update: static (legacy) | paper_sum (diagnostic) | mean')
+    parser.add_argument('--wdiv_mode', default='legacy',
+                        choices=['legacy', 'paper', 'rank_aware'],
+                        help='Wasserstein diversity loss variant')
+    parser.add_argument('--train_seed', default=1029, type=int,
+                        help='seed for model init / data order (separate from --dataseed split seed)')
+    parser.add_argument('--deterministic', default=True, type=str2bool,
+                        help='cudnn deterministic + benchmark off for reproducibility')
 
     # scheduler
     parser.add_argument('--scheduler', default='CosineAnnealingLR',
@@ -304,19 +316,19 @@ def validate(config, val_loader, model, criterion, device):
                         ('dice', avg_meters['dice'].avg)])
 
 
-def seed_torch(seed=1029):
+def seed_torch(seed=1029, deterministic=True):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = not deterministic
+    torch.backends.cudnn.deterministic = deterministic
 
 
 def main():
-    seed_torch()
+    seed_torch(config.get('train_seed', 1029), deterministic=config.get('deterministic', True))
     config = vars(parse_args())
     device = select_device(config['device'])
     data_root = resolve_data_root(config['data_root'])
@@ -356,17 +368,20 @@ def main():
     if config['loss'] == 'BCEWithLogitsLoss':
         criterion = nn.BCEWithLogitsLoss().to(device)
     elif config['loss'] == 'BCEDiceWithGeometryLoss':
-        criterion = losses.__dict__[config['loss']](div_weight=config.get('div_weight'),scale_weight=config.get('scale_weight')).to(device)
+        criterion = losses.__dict__[config['loss']](div_weight=config.get('div_weight'),scale_weight=config.get('scale_weight'),wdiv_mode=config.get('wdiv_mode','legacy')).to(device)
     else:
         criterion = losses.__dict__[config['loss']]().to(device)
 
-    cudnn.benchmark = True
+    # Prompt 1 fix: do not unconditionally re-enable benchmark (it overrode the
+    # deterministic setting from seed_torch). Respect --deterministic.
+    cudnn.benchmark = not config.get('deterministic', True)
 
     gbc_kwargs = {
         'gbc_num_balls': config.get('gbc_num_balls'),
         'gbc_proj_dim': None if config.get('gbc_proj_dim') == 0 else config.get('gbc_proj_dim'),
         'use_diag_cov': config.get('use_diag_cov'),
         'tau': config.get('tau'),
+        'gbc_mode': config.get('gbc_mode', 'static'),
     }
 
     # create model
@@ -383,12 +398,15 @@ def main():
     gbc_centers_params = []
     others = []
 
+    # Prompt 1 fix: geometry group = ONLY the granular-ball geometry parameters
+    # (centers / log_sigma / log_radius). The previous rule put every parameter
+    # whose name contained 'gbc' — including the GBC refine conv/BN and the
+    # projection conv/BN — into the high-LR geometry group.
+    geometry_suffixes = ('centers', 'log_sigma', 'log_radius')
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        lname = name.lower()
-        # recognize GBC centers parameter by name 'centers' or 'gbc'
-        if 'centers' in lname or 'gbc' in lname:
+        if name.split('.')[-1] in geometry_suffixes:
             gbc_centers_params.append(param)
         else:
             others.append(param)
