@@ -9,9 +9,20 @@ mps + cuda + cpu.
 - **Method = EP-GBC (Evidence-Posterior Granular Balls)** under **Plan A**: the
   Gaussian energy (§4) is the *core* assignment and a full MAP derivation (§6) is
   given. The name "posterior/Evidence-Posterior" is licensed only because of this.
-- **Fallback (Plan B), if Gaussian energy destabilizes training:** keep the
-  Mahalanobis energy and **rename to "Mass-Adaptive Consensus GBC" / "Evidence-
-  Weighted Shrinkage GBC"** — and drop "posterior" language. Decide at end of M1.
+- **"posterior" refers ONLY to the posterior of the latent ball center `μ_k`** —
+  NOT a segmentation-mask posterior, pixel-label posterior, or uncertainty map.
+  Forbidden phrasing: "Bayesian segmentation", "mask posterior uncertainty",
+  "calibrated uncertainty", "James–Stein estimator". Allowed: "under a conditional
+  Normal–Normal model for the latent ball center, the update is a posterior-mean /
+  MAP shrinkage estimator; in implementation it is a deterministic prior-regularized
+  region refiner."
+- **Hard name-downgrade rule:** if `energy_mode=mahalanobis` (no `log|Σ|`/`π_k`),
+  the method is NOT a true posterior → it **must** be renamed "Mass-Adaptive
+  Consensus GBC" / "Evidence-Weighted Shrinkage GBC". "Evidence-Posterior" requires
+  Gaussian energy.
+- **Fallback (Plan B) trigger (decide at end of M1.5):** rename as above if R008
+  shows log-volume dominates, assignment collapses, ρ reflects only mass (R007
+  fails), or MAP ≈ mean/free-gate/observed-GMM.
 
 ## 2. Symbols (frozen — resolves the λ collision)
 | Symbol | Meaning |
@@ -22,7 +33,7 @@ mps + cuda + cpu.
 | `z_i ∈ R^D` | pixel feature i |
 | `c_k ∈ R^D` | global learned ball center (prior mean) |
 | `σ_k² ∈ R^D_{>0}` | global learned diagonal scale (prior variance); `σ_k = softplus(log_sigma)` |
-| `π_k` | mixture weight — **v1: fixed `π_k = 1/K`** (so `−2 log π_k` is constant, dropped). Learned/usage π is deferred. |
+| `π_k` | mixture weight — **v1: fixed `π_k = 1/K`**, a **uniform-mixture design choice to isolate the shrinkage effect, NOT a contribution** (so `−2 log π_k` is constant, dropped). Learned/non-uniform π is deferred to appendix; NOT before M2. |
 | `α_{ik}` | soft assignment of pixel i to ball k, `Σ_k α_{ik}=1` |
 | `m_k = Σ_i α_{ik}` | soft ball mass (coverage) |
 | `κ` | resolution-normalized prior fraction (scalar; `learn_kappa` optional) |
@@ -32,11 +43,17 @@ mps + cuda + cpu.
 | `τ` | assignment temperature |
 The bare symbol `λ` is **retired**.
 
-## 3. Reduction convention
-Distance and log-volume terms use the **same reduction over D**. Default
-`distance_reduction = sum`. Dividing the energy by `D` (mean) is an allowed
-alternative that makes `τ` comparable across S/M/L; pick one in config and keep it
-fixed within an experiment.
+## 3. Reduction convention (FROZEN for main experiments)
+Distance and log-volume terms use the **same reduction over D**. **Main
+experiments fix `distance_reduction = sum`** (frozen in the config schema, §9). The
+`mean` alternative (makes `τ` comparable across S/M/L) is a diagnostic only and
+must not vary within the main experiment set.
+
+## 3b. Anisotropy claim limits (FROZEN)
+Diagonal `σ_k²` models **axis-aligned anisotropy / heteroscedasticity ONLY**. Do
+NOT claim rotation, full covariance, or skewness modeling. Rotation may be claimed
+only if a learnable 1×1 projection is explicitly argued as a learned near-diagonal
+frame.
 
 ## 4. Assignment energy (core = Gaussian)
 ```
